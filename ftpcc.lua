@@ -384,6 +384,9 @@ do
       if type(path) ~= "string" then
         error("bad argument #1 (expected string, got " .. type(path) .. ")", 2)
       end
+      if path == "" then
+        path = "/"
+      end
       local o
       if self.transfer_params.type ~= "A" then
         o = self.transfer_params.type
@@ -423,6 +426,9 @@ do
       if type(path) ~= "string" then
         error("bad argument #1 (expected string, got " .. type(path) .. ")", 2)
       end
+      if path == "" then
+        path = "/"
+      end
       local ok, code, err = self:_send_command("CWD " .. path)
       local _exp_0 = code
       if 533 == _exp_0 or 550 == _exp_0 then
@@ -440,6 +446,9 @@ do
     getSize = function(self, path)
       if type(path) ~= "string" then
         error("bad argument #1 (expected string, got " .. type(path) .. ")", 2)
+      end
+      if path == "" then
+        path = "/"
       end
       local data, code, err = self:_receive_data("RETR " .. path)
       if data == nil then
@@ -966,11 +975,16 @@ do
         if dir == nil then
           return "501 Missing file name"
         end
+        local path
         if dir:sub(1, 1) == "/" then
-          state.dir = dir:sub(2)
+          path = dir:sub(2)
         else
-          state.dir = fs.combine(state.dir, dir)
+          path = fs.combine(state.dir, dir)
         end
+        if not self.filesystem.isDir(path) then
+          return "550 Not a directory"
+        end
+        state.dir = path
         return "200 OK"
       end,
       CDUP = function(self, state)

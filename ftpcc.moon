@@ -256,6 +256,7 @@ class client
 
     list: (path) =>
         if type(path) != "string" then error "bad argument #1 (expected string, got " .. type(path) .. ")", 2
+        path = "/" if path == ""
         local o
         if @transfer_params.type != "A"
             o = @transfer_params.type
@@ -269,6 +270,7 @@ class client
 
     isDir: (path) =>
         if type(path) != "string" then error "bad argument #1 (expected string, got " .. type(path) .. ")", 2
+        path = "/" if path == ""
         -- checks by trying to cd into path
         ok, code, err = @_send_command "CWD " .. path
         switch code
@@ -282,6 +284,7 @@ class client
 
     getSize: (path) =>
         if type(path) != "string" then error "bad argument #1 (expected string, got " .. type(path) .. ")", 2
+        path = "/" if path == ""
         -- Gets file size by reading entire file; this is expensive
         data, code, err = @_receive_data "RETR " .. path
         if data == nil then error err .. " (" .. code .. ")", 2
@@ -575,7 +578,9 @@ class server
         CWD: (self, state, dir) ->
             return "530 Not logged in." if self.auth != nil and not self.auth state.username, state.password
             return "501 Missing file name" if dir == nil
-            state.dir = if dir\sub(1, 1) == "/" then dir\sub 2 else fs.combine state.dir, dir
+            path = if dir\sub(1, 1) == "/" then dir\sub 2 else fs.combine state.dir, dir
+            return "550 Not a directory" if not self.filesystem.isDir(path)
+            state.dir = path
             return "200 OK"
         CDUP: (self, state) ->
             return "530 Not logged in." if self.auth != nil and not self.auth state.username, state.password
