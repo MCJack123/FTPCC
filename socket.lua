@@ -76,7 +76,7 @@ do
                 if self.timeout > 0 then
                   os.cancelTimer(tm)
                 end
-                return tonumber(padstr(ev[5].data, ev[5].size)) == crc32(data), "Invalid checksum"
+                return tonumber(padstr(ev[5].data, ev[5].size), 16) == crc32(data), "Invalid checksum (got " .. (tonumber(padstr(ev[5].data, ev[5].size), 16) or "none") .. " vs. " .. crc32(data) .. ")"
               elseif "disconnected" == _exp_0 then
                 self:close()
                 if self.timeout > 0 then

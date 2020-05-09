@@ -37,6 +37,7 @@ class client
         if @connection == nil then error "Could not connect to server: " .. (err or ""), 2
         @pasv = pasv
         @transfer_params = {type: "A", mode: "S"}
+        @_send_command!
 
     -- Sends a command and handles the reply
     _send_command: (command) =>
@@ -70,7 +71,7 @@ class client
             if port == nil then error "Ran out of ports for data connection"
             id = os.computerID!
             ok, code, res = @_send_command "PORT " .. math.floor(id / 16777216) .. "," .. (math.floor(id / 65536) % 256) .. "," .. (math.floor(id / 256) % 256) .. "," .. (id % 256) .. "," .. math.floor(port / 256) .. "," .. (id % 256)
-            return false, code, res if code != 200
+            return nil, code, res if code != 200
             local data, data_connection, err
             parallel.waitForAll (->
                     ok, code, err = @_send_command command
@@ -104,7 +105,7 @@ class client
                 )
             data_connection\close! if data_connection.is_open
             @pasv port
-            if @transfer_params.type == "A" then data = data\gsub "[\128-\255]", "?"
+            if @transfer_params.type == "A" and data != nil then data = data\gsub "[\128-\255]", "?"
             return data, code, err
         else
             ok, code, res = @_send_command "PASV"
@@ -217,7 +218,8 @@ class client
         switch code
             when 230 then return true
             when 500, 501, 421, 530 then return false, err
-            when 331, 332 then if password == nil then return false, "Password required"
+            when 331, 332
+                if password == nil then return false, "Password required"
             else error "Malformed reply (invalid code): " .. code
         ok, code, err = @_send_command "PASS " .. password
         switch code
@@ -260,8 +262,8 @@ class client
             if @setTransferParams("A") != "A" then error "Could not switch to ASCII data type"
         data, code, err = @_receive_data "NLST " .. path
         if o then @setTransferParams o
-        if data == nil then error err .. " (" .. code .. ")", 2
-        return [line for line in data\gmatch "[^\r\n]"]
+        if not data then error err .. " (" .. code .. ")", 2
+        return [line for line in data\gmatch "[^\r\n]+"]
     
     exists: (path) => #[v for _,v in ipairs @list fs.getDir path when v == fs.getName path] > 0
 
@@ -496,8 +498,8 @@ class server_connection
         @status.current_bytes += #d
 
     send_data: (data, port_provider) =>
-        @state.status.current_bytes = 0
-        @state.status.target_bytes = #data
+        @status.current_bytes = 0
+        @status.target_bytes = #data
         switch @transfer_params.mode
             when "S" then for i = 1, #data, 65536 do @send data\sub i, i + 65535
             when "B"
@@ -559,10 +561,12 @@ class server
     --- A table that holds all of the commands.
     commands: {
         USER: (self, state, username) ->
+            return "501 Missing username" if username == nil
             state.username = username
             if self.auth == nil or self.auth state.username then return "230 User logged in, proceed."
             else return "331 User name okay, need password."
         PASS: (self, state, password) ->
+            return "501 Missing password" if password == nil
             state.password = password
             if self.auth == nil then return "202 Password not required for this server."
             elseif self.auth state.username, state.password then return "230 User logged in, proceed."
@@ -570,6 +574,7 @@ class server
         ACCT: (self, state) -> "502 ACCT command not implemented"
         CWD: (self, state, dir) ->
             return "530 Not logged in." if self.auth != nil and not self.auth state.username, state.password
+            return "501 Missing file name" if dir == nil
             state.dir = if dir\sub(1, 1) == "/" then dir\sub 2 else fs.combine state.dir, dir
             return "200 OK"
         CDUP: (self, state) ->
@@ -589,7 +594,9 @@ class server
             state.socket\close!
         PORT: (self, state, port) ->
             return "530 Not logged in." if self.auth != nil and not self.auth state.username, state.password
+            return "501 Missing ID/port" if port == nil
             p = port\match"(%d+),(%d+),(%d+),(%d+),(%d+),(%d+)"
+            return "501 Port specified is not correctly formatted" if tonumber(p[1]) == nil or tonumber(p[2]) == nil or tonumber(p[3]) == nil or tonumber(p[4]) == nil or tonumber(p[5]) == nil or tonumber(p[6]) == nil
             state.connection = {
                 id: bit32.lshift(tonumber(p[1]), 24) + bit32.lshift(tonumber(p[2]), 16) + bit32.lshift(tonumber(p[3]), 8) + tonumber(p[4])
                 port: bit32.lshift(tonumber(p[5]), 8) + tonumber(p[6])
@@ -599,13 +606,14 @@ class server
             return "530 Not logged in." if self.auth != nil and not self.auth state.username, state.password
             state.connection = {id: nil, port: self.port_provider!}
             id = os.computerID!
-            state.connection.task = self\_add_task (-> state.connection.socket = listen id, self.modem, state.connection.port)
+            state.connection.task = self\_add_task (-> state.connection.socket = listen id, self.modem, state.connection.port), "passive listener " .. state.connection.port
+            sleep 0.05
             return ("227 Entering passive mode. %d,%d,%d,%d,%d,%d")\format bit32.rshift(bit32.band(id, 0xFF000000), 24), 
                 bit32.rshift(bit32.band(id, 0xFF0000), 16),
                 bit32.rshift(bit32.band(id, 0xFF00), 8),
                 bit32.band(id, 0xFF),
                 bit32.rshift(bit32.band(state.connection.port, 0xFF00), 8),
-                bit32.band 0xFF
+                bit32.band state.connection.port, 0xFF
         TYPE: (self, state, type) ->
             c = type\sub(1, 1)\upper!
             return "504 Transfer type " .. c .. " not supported" if c == "E" or c == "L"
@@ -620,9 +628,10 @@ class server
             return "200 OK"
         RETR: (self, state, file) ->
             return "530 Not logged in." if self.auth != nil and not self.auth state.username, state.password
+            return "501 Missing file name" if file == nil
             return "503 Bad sequence of commands" if state.connection.port == nil
             return "425 Data connection already open" if state.current_task != nil
-            path = if file\sub(1, 1) == "/" then file else fs.combine state.dir, path
+            path = if file\sub(1, 1) == "/" then file else fs.combine state.dir, file
             if not self.filesystem.exists(path) or self.filesystem.isDir path
                 state.connection = nil
                 return "550 " .. (self.filesystem.isDir(path) and "Path is directory" or "File does not exist")
@@ -648,15 +657,16 @@ class server
                     state.status.current_bytes = nil
                     state.status.target_bytes = nil
                     state.status.current_command = nil
-                )
+                ), "send data " .. file
             state.status.current_command = "RETR " .. path
             if state.connection.socket == nil then return "150 Opening data connection"
             else return "125 Data connection already open; transfer starting."
         STOR: (self, state, file) ->
             return "530 Not logged in." if self.auth != nil and not self.auth state.username, state.password
+            return "501 Missing file name" if file == nil
             return "503 Bad sequence of commands" if state.connection.port == nil
             return "425 Data connection already open" if state.current_task != nil
-            path = if file\sub(1, 1) == "/" then file else fs.combine state.dir, path
+            path = if file\sub(1, 1) == "/" then file else fs.combine state.dir, file
             if self.filesystem.isDir path
                 state.connection = nil
                 return "550 Path is directory"
@@ -679,7 +689,7 @@ class server
                     state.status.current_bytes = nil
                     state.status.target_bytes = nil
                     state.status.current_command = nil
-                )
+                ), "receive data " .. file
             state.status.current_command = "STOR " .. path
             if state.connection.socket == nil then return "150 Opening data connection"
             else return "125 Data connection already open; transfer starting."
@@ -712,15 +722,16 @@ class server
                     state.status.current_bytes = nil
                     state.status.target_bytes = nil
                     state.status.current_command = nil
-                )
+                ), "store unique " .. path
             state.status.current_command = "STOU " .. path
             if state.connection.socket == nil then return "150 Opening data connection"
             else return "125 Data connection already open; transfer starting."
         APPE: (self, state, file) ->
             return "530 Not logged in." if self.auth != nil and not self.auth state.username, state.password
+            return "501 Missing file name" if file == nil
             return "503 Bad sequence of commands" if state.connection.port == nil
             return "425 Data connection already open" if state.current_task != nil
-            path = if file\sub(1, 1) == "/" then file else fs.combine state.dir, path
+            path = if file\sub(1, 1) == "/" then file else fs.combine state.dir, file
             if self.filesystem.isDir path
                 state.connection = nil
                 return "550 Path is directory"
@@ -743,7 +754,7 @@ class server
                     state.status.current_bytes = nil
                     state.status.target_bytes = nil
                     state.status.current_command = nil
-                )
+                ), "append " .. file
             state.status.current_command = "APPE " .. path
             if state.connection.socket == nil then return "150 Opening data connection"
             else return "125 Data connection already open; transfer starting."
@@ -751,10 +762,12 @@ class server
         REST: (self, state) -> "502 REST command not implemented"
         RNFR: (self, state, name) ->
             return "530 Not logged in." if self.auth != nil and not self.auth state.username, state.password
+            return "501 Missing file name" if name == nil
             state.rename_from = name
             return "350 Awaiting name to rename to."
         RNTO: (self, state, name) ->
             return "530 Not logged in." if self.auth != nil and not self.auth state.username, state.password
+            return "501 Missing file name" if name == nil
             return "503 Bad sequence of commands" if state.rename_from == nil
             old = if state.rename_from\sub(1, 1) == "/" then state.rename_from else fs.combine(state.dir, state.rename_from)
             new = if name\sub(1, 1) == "/" then name else fs.combine(state.dir, name)
@@ -769,21 +782,24 @@ class server
             return "226 Data transfer successfully aborted."
         DELE: (self, state, file) ->
             return "530 Not logged in." if self.auth != nil and not self.auth state.username, state.password
-            path = if file\sub(1, 1) == "/" then file else fs.combine state.dir, path
+            return "501 Missing file name" if file == nil
+            ath = if file\sub(1, 1) == "/" then file else fs.combine state.dir, path
             return "550 File not found" if not fs.exists path
             return "550 Path is directory" if fs.isDir path
             self.filesystem.delete path
             return "250 File deleted"
         RMD: (self, state, file) ->
             return "530 Not logged in." if self.auth != nil and not self.auth state.username, state.password
-            path = if file\sub(1, 1) == "/" then file else fs.combine state.dir, path
+            return "501 Missing file name" if file == nil
+            path = if file\sub(1, 1) == "/" then file else fs.combine state.dir, file
             return "550 Directory not found" if not fs.exists path
             return "550 Path is not directory" if not fs.isDir path
             self.filesystem.delete path
             return "250 Directory deleted"
         MKD: (self, state, file) ->
             return "530 Not logged in." if self.auth != nil and not self.auth state.username, state.password
-            path = if file\sub(1, 1) == "/" then file else fs.combine state.dir, path
+            return "501 Missing file name" if file == nil
+            path = if file\sub(1, 1) == "/" then file else fs.combine state.dir, file
             self.filesystem.makeDir path
             return '257 Created directory "' .. path .. '"'
         PWD: (self, state) ->
@@ -791,15 +807,15 @@ class server
             return '257 "' .. self.dir .. '"'
         LIST: (self, state, file=state.dir) ->
             return "530 Not logged in." if self.auth != nil and not self.auth state.username, state.password
-
+            return "202 Not implemented yet"
         NLST: (self, state, file=state.dir) ->
             return "530 Not logged in." if self.auth != nil and not self.auth state.username, state.password
             return "503 Bad sequence of commands" if state.connection.port == nil
             return "425 Data connection already open" if state.current_task != nil
-            path = if file\sub(1, 1) == "/" then file else fs.combine state.dir, path
-            if self.filesystem.isDir path
+            path = if file\sub(1, 1) == "/" then file else fs.combine state.dir, file
+            if not self.filesystem.isDir path
                 state.connection = nil
-                return "550 Path is directory"
+                return "550 Path is not a directory"
             state.current_task = self\_add_task (->
                     if state.connection.id != nil
                         state.connection.socket = connect os.computerID!, self.modem, state.connection.id, self.connection.port, 1
@@ -807,14 +823,14 @@ class server
                         if state.connection.task != nil then self.tasks[state.connection.task] = nil
                         state.connection = nil
                         state.socket\send "425 Unable to open data connection."
-                    state\send_data table.concat([v for _,v in ipairs self.filesystem.list!], "\n"), self.port_provider
+                    state\send_data table.concat([v for _,v in ipairs self.filesystem.list path], "\n"), self.port_provider
                     state.connection = nil
                     state.current_task = nil
                     state.status.current_bytes = nil
                     state.status.target_bytes = nil
                     state.status.current_command = nil
-                )
-            state.status.current_command = "APPE " .. path
+                ), "name list " .. file
+            state.status.current_command = "NLST " .. path
             if state.connection.socket == nil then return "150 Opening data connection"
             else return "125 Data connection already open; transfer starting."
         SITE: (self, state) -> "202 Not implemented"
@@ -830,23 +846,24 @@ class server
         NOOP: (self, state) -> "200 NOOP command successful"
     }
 
-    _add_task: (func) =>
+    _add_task: (func, name) =>
         return if @tasks == nil
         id = #@tasks+1
-        @tasks[id] = {coro: coroutine.create func, filter: nil}
+        @tasks[id] = {coro: coroutine.create(func), filter: nil, _name: name}
         return id
 
     _listen: =>
         while true -- change this to a conditional?
             socket = listen os.computerID!, @modem, @port
-            @_add_task (-> @_run_connection server_connection socket)
+            @_add_task (-> @_run_connection server_connection socket), "connection " .. socket.id
 
     _run_connection: (state) =>
         state.socket\send "220 Hello!"
         while state.socket.is_open
             req, err = state.socket\receive 3600
             break if req == nil
-            command, arg = req\sub(1, req\find" " - 1)\upper!, req\sub req\find" " + 1
+            command, arg = req
+            if req\find " " then command, arg = req\sub(1, req\find" " - 1)\upper!, req\sub req\find" " + 1
             if @commands[command] == nil then state.socket\send "500 Unknown command '" .. command .. "'"
             else
                 if arg == "" then arg = nil
@@ -858,15 +875,15 @@ class server
     --- Listens for FTP requests.
     listen: =>
         -- Since many sockets may be listening at the same time, we'll be using
-        -- a coroutine manager to handle events.
-        @tasks = {{coro: coroutine.create(-> @_listen!), filter: nil}}
+        -- a simple coroutine manager to handle events.
+        @tasks = {{coro: coroutine.create(-> @_listen!), filter: nil, _name: "root listener"}}
         while #@tasks > 0
             ev = {os.pullEvent!}
             delete = {}
             for i,v in ipairs(@tasks)
                 if v.filter == nil or v.filter == ev[1]
                     ok, v.filter = coroutine.resume v.coro, table.unpack ev
-                    print ok, v.filter
+                    if not ok then print (v.name or "unknown") .. ": " .. v.filter
                     if not ok or coroutine.status(v.coro) != "suspended" then table.insert delete, i
             for _,i in ipairs(delete) do @tasks[i] = nil
         @tasks = nil

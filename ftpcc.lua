@@ -92,7 +92,7 @@ do
         local id = os.computerID()
         local ok, code, res = self:_send_command("PORT " .. math.floor(id / 16777216) .. "," .. (math.floor(id / 65536) % 256) .. "," .. (math.floor(id / 256) % 256) .. "," .. (id % 256) .. "," .. math.floor(port / 256) .. "," .. (id % 256))
         if code ~= 200 then
-          return false, code, res
+          return nil, code, res
         end
         local data, data_connection, err
         parallel.waitForAll((function()
@@ -142,7 +142,7 @@ do
           data_connection:close()
         end
         self:pasv(port)
-        if self.transfer_params.type == "A" then
+        if self.transfer_params.type == "A" and data ~= nil then
           data = data:gsub("[\128-\255]", "?")
         end
         return data, code, err
@@ -325,9 +325,9 @@ do
       elseif 331 == _exp_0 or 332 == _exp_0 then
         if password == nil then
           return false, "Password required"
-        else
-          error("Malformed reply (invalid code): " .. code)
         end
+      else
+        error("Malformed reply (invalid code): " .. code)
       end
       ok, code, err = self:_send_command("PASS " .. password)
       local _exp_1 = code
@@ -395,12 +395,12 @@ do
       if o then
         self:setTransferParams(o)
       end
-      if data == nil then
+      if not data then
         error(err .. " (" .. code .. ")", 2)
       end
       local _accum_0 = { }
       local _len_0 = 1
-      for line in data:gmatch("[^\r\n]") do
+      for line in data:gmatch("[^\r\n]+") do
         _accum_0[_len_0] = line
         _len_0 = _len_0 + 1
       end
@@ -800,6 +800,7 @@ do
         type = "A",
         mode = "S"
       }
+      return self:_send_command()
     end,
     __base = _base_0,
     __name = "client"
@@ -824,8 +825,8 @@ do
       self.status.current_bytes = self.status.current_bytes + #d
     end,
     send_data = function(self, data, port_provider)
-      self.state.status.current_bytes = 0
-      self.state.status.target_bytes = #data
+      self.status.current_bytes = 0
+      self.status.target_bytes = #data
       local _exp_0 = self.transfer_params.mode
       if "S" == _exp_0 then
         for i = 1, #data, 65536 do
@@ -932,6 +933,9 @@ do
   local _base_0 = {
     commands = {
       USER = function(self, state, username)
+        if username == nil then
+          return "501 Missing username"
+        end
         state.username = username
         if self.auth == nil or self.auth(state.username) then
           return "230 User logged in, proceed."
@@ -940,6 +944,9 @@ do
         end
       end,
       PASS = function(self, state, password)
+        if password == nil then
+          return "501 Missing password"
+        end
         state.password = password
         if self.auth == nil then
           return "202 Password not required for this server."
@@ -955,6 +962,9 @@ do
       CWD = function(self, state, dir)
         if self.auth ~= nil and not self.auth(state.username, state.password) then
           return "530 Not logged in."
+        end
+        if dir == nil then
+          return "501 Missing file name"
         end
         if dir:sub(1, 1) == "/" then
           state.dir = dir:sub(2)
@@ -992,7 +1002,13 @@ do
         if self.auth ~= nil and not self.auth(state.username, state.password) then
           return "530 Not logged in."
         end
+        if port == nil then
+          return "501 Missing ID/port"
+        end
         local p = port:match("(%d+),(%d+),(%d+),(%d+),(%d+),(%d+)")
+        if tonumber(p[1]) == nil or tonumber(p[2]) == nil or tonumber(p[3]) == nil or tonumber(p[4]) == nil or tonumber(p[5]) == nil or tonumber(p[6]) == nil then
+          return "501 Port specified is not correctly formatted"
+        end
         state.connection = {
           id = bit32.lshift(tonumber(p[1]), 24) + bit32.lshift(tonumber(p[2]), 16) + bit32.lshift(tonumber(p[3]), 8) + tonumber(p[4]),
           port = bit32.lshift(tonumber(p[5]), 8) + tonumber(p[6])
@@ -1010,8 +1026,9 @@ do
         local id = os.computerID()
         state.connection.task = self:_add_task((function()
           state.connection.socket = listen(id, self.modem, state.connection.port)
-        end))
-        return ("227 Entering passive mode. %d,%d,%d,%d,%d,%d"):format(bit32.rshift(bit32.band(id, 0xFF000000), 24), bit32.rshift(bit32.band(id, 0xFF0000), 16), bit32.rshift(bit32.band(id, 0xFF00), 8), bit32.band(id, 0xFF), bit32.rshift(bit32.band(state.connection.port, 0xFF00), 8), bit32.band(0xFF))
+        end), "passive listener " .. state.connection.port)
+        sleep(0.05)
+        return ("227 Entering passive mode. %d,%d,%d,%d,%d,%d"):format(bit32.rshift(bit32.band(id, 0xFF000000), 24), bit32.rshift(bit32.band(id, 0xFF0000), 16), bit32.rshift(bit32.band(id, 0xFF00), 8), bit32.band(id, 0xFF), bit32.rshift(bit32.band(state.connection.port, 0xFF00), 8), bit32.band(state.connection.port, 0xFF))
       end,
       TYPE = function(self, state, type)
         local c = type:sub(1, 1):upper()
@@ -1039,6 +1056,9 @@ do
         if self.auth ~= nil and not self.auth(state.username, state.password) then
           return "530 Not logged in."
         end
+        if file == nil then
+          return "501 Missing file name"
+        end
         if state.connection.port == nil then
           return "503 Bad sequence of commands"
         end
@@ -1049,7 +1069,7 @@ do
         if file:sub(1, 1) == "/" then
           path = file
         else
-          path = fs.combine(state.dir, path)
+          path = fs.combine(state.dir, file)
         end
         if not self.filesystem.exists(path) or self.filesystem.isDir(path) then
           state.connection = nil
@@ -1082,7 +1102,7 @@ do
           state.status.current_bytes = nil
           state.status.target_bytes = nil
           state.status.current_command = nil
-        end))
+        end), "send data " .. file)
         state.status.current_command = "RETR " .. path
         if state.connection.socket == nil then
           return "150 Opening data connection"
@@ -1094,6 +1114,9 @@ do
         if self.auth ~= nil and not self.auth(state.username, state.password) then
           return "530 Not logged in."
         end
+        if file == nil then
+          return "501 Missing file name"
+        end
         if state.connection.port == nil then
           return "503 Bad sequence of commands"
         end
@@ -1104,7 +1127,7 @@ do
         if file:sub(1, 1) == "/" then
           path = file
         else
-          path = fs.combine(state.dir, path)
+          path = fs.combine(state.dir, file)
         end
         if self.filesystem.isDir(path) then
           state.connection = nil
@@ -1136,7 +1159,7 @@ do
           state.status.current_bytes = nil
           state.status.target_bytes = nil
           state.status.current_command = nil
-        end))
+        end), "receive data " .. file)
         state.status.current_command = "STOR " .. path
         if state.connection.socket == nil then
           return "150 Opening data connection"
@@ -1219,7 +1242,7 @@ do
           state.status.current_bytes = nil
           state.status.target_bytes = nil
           state.status.current_command = nil
-        end))
+        end), "store unique " .. path)
         state.status.current_command = "STOU " .. path
         if state.connection.socket == nil then
           return "150 Opening data connection"
@@ -1231,6 +1254,9 @@ do
         if self.auth ~= nil and not self.auth(state.username, state.password) then
           return "530 Not logged in."
         end
+        if file == nil then
+          return "501 Missing file name"
+        end
         if state.connection.port == nil then
           return "503 Bad sequence of commands"
         end
@@ -1241,7 +1267,7 @@ do
         if file:sub(1, 1) == "/" then
           path = file
         else
-          path = fs.combine(state.dir, path)
+          path = fs.combine(state.dir, file)
         end
         if self.filesystem.isDir(path) then
           state.connection = nil
@@ -1273,7 +1299,7 @@ do
           state.status.current_bytes = nil
           state.status.target_bytes = nil
           state.status.current_command = nil
-        end))
+        end), "append " .. file)
         state.status.current_command = "APPE " .. path
         if state.connection.socket == nil then
           return "150 Opening data connection"
@@ -1291,12 +1317,18 @@ do
         if self.auth ~= nil and not self.auth(state.username, state.password) then
           return "530 Not logged in."
         end
+        if name == nil then
+          return "501 Missing file name"
+        end
         state.rename_from = name
         return "350 Awaiting name to rename to."
       end,
       RNTO = function(self, state, name)
         if self.auth ~= nil and not self.auth(state.username, state.password) then
           return "530 Not logged in."
+        end
+        if name == nil then
+          return "501 Missing file name"
         end
         if state.rename_from == nil then
           return "503 Bad sequence of commands"
@@ -1332,11 +1364,14 @@ do
         if self.auth ~= nil and not self.auth(state.username, state.password) then
           return "530 Not logged in."
         end
-        local path
+        if file == nil then
+          return "501 Missing file name"
+        end
+        local ath
         if file:sub(1, 1) == "/" then
-          path = file
+          ath = file
         else
-          path = fs.combine(state.dir, path)
+          ath = fs.combine(state.dir, path)
         end
         if not fs.exists(path) then
           return "550 File not found"
@@ -1351,11 +1386,14 @@ do
         if self.auth ~= nil and not self.auth(state.username, state.password) then
           return "530 Not logged in."
         end
+        if file == nil then
+          return "501 Missing file name"
+        end
         local path
         if file:sub(1, 1) == "/" then
           path = file
         else
-          path = fs.combine(state.dir, path)
+          path = fs.combine(state.dir, file)
         end
         if not fs.exists(path) then
           return "550 Directory not found"
@@ -1370,11 +1408,14 @@ do
         if self.auth ~= nil and not self.auth(state.username, state.password) then
           return "530 Not logged in."
         end
+        if file == nil then
+          return "501 Missing file name"
+        end
         local path
         if file:sub(1, 1) == "/" then
           path = file
         else
-          path = fs.combine(state.dir, path)
+          path = fs.combine(state.dir, file)
         end
         self.filesystem.makeDir(path)
         return '257 Created directory "' .. path .. '"'
@@ -1392,6 +1433,7 @@ do
         if self.auth ~= nil and not self.auth(state.username, state.password) then
           return "530 Not logged in."
         end
+        return "202 Not implemented yet"
       end,
       NLST = function(self, state, file)
         if file == nil then
@@ -1410,11 +1452,11 @@ do
         if file:sub(1, 1) == "/" then
           path = file
         else
-          path = fs.combine(state.dir, path)
+          path = fs.combine(state.dir, file)
         end
-        if self.filesystem.isDir(path) then
+        if not self.filesystem.isDir(path) then
           state.connection = nil
-          return "550 Path is directory"
+          return "550 Path is not a directory"
         end
         state.current_task = self:_add_task((function()
           if state.connection.id ~= nil then
@@ -1430,7 +1472,7 @@ do
           state:send_data(table.concat((function()
             local _accum_0 = { }
             local _len_0 = 1
-            for _, v in ipairs(self.filesystem.list()) do
+            for _, v in ipairs(self.filesystem.list(path)) do
               _accum_0[_len_0] = v
               _len_0 = _len_0 + 1
             end
@@ -1441,8 +1483,8 @@ do
           state.status.current_bytes = nil
           state.status.target_bytes = nil
           state.status.current_command = nil
-        end))
-        state.status.current_command = "APPE " .. path
+        end), "name list " .. file)
+        state.status.current_command = "NLST " .. path
         if state.connection.socket == nil then
           return "150 Opening data connection"
         else
@@ -1468,15 +1510,15 @@ do
         return "200 NOOP command successful"
       end
     },
-    _add_task = function(self, func)
+    _add_task = function(self, func, name)
       if self.tasks == nil then
         return 
       end
       local id = #self.tasks + 1
       self.tasks[id] = {
-        coro = coroutine.create(func, {
-          filter = nil
-        })
+        coro = coroutine.create(func),
+        filter = nil,
+        _name = name
       }
       return id
     end,
@@ -1485,7 +1527,7 @@ do
         local socket = listen(os.computerID(), self.modem, self.port)
         self:_add_task((function()
           return self:_run_connection(server_connection(socket))
-        end))
+        end), "connection " .. socket.id)
       end
     end,
     _run_connection = function(self, state)
@@ -1495,7 +1537,10 @@ do
         if req == nil then
           break
         end
-        local command, arg = req:sub(1, req:find(" ") - 1):upper(), req:sub(req:find(" ") + 1)
+        local command, arg = req
+        if req:find(" ") then
+          command, arg = req:sub(1, req:find(" ") - 1):upper(), req:sub(req:find(" ") + 1)
+        end
         if self.commands[command] == nil then
           state.socket:send("500 Unknown command '" .. command .. "'")
         else
@@ -1519,7 +1564,8 @@ do
           coro = coroutine.create(function()
             return self:_listen()
           end),
-          filter = nil
+          filter = nil,
+          _name = "root listener"
         }
       }
       while #self.tasks > 0 do
@@ -1531,7 +1577,9 @@ do
           if v.filter == nil or v.filter == ev[1] then
             local ok
             ok, v.filter = coroutine.resume(v.coro, table.unpack(ev))
-            print(ok, v.filter)
+            if not ok then
+              print((v.name or "unknown") .. ": " .. v.filter)
+            end
             if not ok or coroutine.status(v.coro) ~= "suspended" then
               table.insert(delete, i)
             end
