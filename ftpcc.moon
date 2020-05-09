@@ -783,7 +783,7 @@ class server
         DELE: (self, state, file) ->
             return "530 Not logged in." if self.auth != nil and not self.auth state.username, state.password
             return "501 Missing file name" if file == nil
-            ath = if file\sub(1, 1) == "/" then file else fs.combine state.dir, path
+            path = if file\sub(1, 1) == "/" then file else fs.combine state.dir, file
             return "550 File not found" if not fs.exists path
             return "550 Path is directory" if fs.isDir path
             self.filesystem.delete path

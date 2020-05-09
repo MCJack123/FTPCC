@@ -1367,11 +1367,11 @@ do
         if file == nil then
           return "501 Missing file name"
         end
-        local ath
+        local path
         if file:sub(1, 1) == "/" then
-          ath = file
+          path = file
         else
-          ath = fs.combine(state.dir, path)
+          path = fs.combine(state.dir, file)
         end
         if not fs.exists(path) then
           return "550 File not found"
