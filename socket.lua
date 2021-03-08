@@ -10,7 +10,9 @@ end
 if false then
   return {
     connect = function(me, modem, id, port)
-      local w = http.websocket("ws://localhost:" .. port)
+      print("Connecting on port", (port + 21))
+      local w
+      repeat w = http.websocket("ws://127.0.0.1:" .. (port + 21)) until w
       return setmetatable({
         send = function(self, s)
           return w.send(s) or true
@@ -20,10 +22,43 @@ if false then
         end,
         close = function(self)
           return w.close()
-        end
+        end,
+        id = math.random(1, 999)
       }, {
         __index = function(self, t)
           if t == "is_open" then
+            return w.isOpen()
+          end
+        end
+      })
+    end,
+    listen = function(me, modem, port, timeout)
+      if timeout == nil then
+        timeout = 5
+      end
+      print("Connecting (listening) on port", (port + 21))
+      print(debug.traceback())
+      local w
+      repeat w = http.websocket("ws://127.0.0.1:" .. (port + 21)) until w
+      local first = w.receive()
+      print("Connected")
+      return setmetatable({
+        send = function(self, s)
+          return w.send(s) or true
+        end,
+        receive = function(self)
+          if first then local a, first = first, nil return first end
+          return w.receive()
+        end,
+        close = function(self)
+          print(debug.traceback("Closing"))
+          return w.close()
+        end,
+        id = math.random(1, 999)
+      }, {
+        __index = function(self, t)
+          if t == "is_open" then
+            print(w.isOpen())
             return w.isOpen()
           end
         end

@@ -3,7 +3,7 @@ padstr = (str, size) -> return if #str < size then str .. (" ")\rep size-str els
 
 -- message types: connect, connected, message, received, disconnected
 
-if false
+if true
     return {
         connect: (me, modem, id, port) -> 
             w = http.websocket("ws://localhost:" .. port)
@@ -11,7 +11,14 @@ if false
                 send: (s) => w.send(s) or true
                 receive: => w.receive!
                 close: => w.close!
-            }, {__index: (t) => if t == "is_open" then return w.isOpen()}
+            }, {__index: (t) => if t == "is_open" then return w.isOpen!}
+        listen: (me, modem, port, timeout=5) ->
+            w = http.websocket("ws://localhost:" .. port)
+            return setmetatable {
+                send: (s) => w.send(s) or true
+                receive: => w.receive!
+                close: => w.close!
+            }, {__index: (t) => if t == "is_open" then return w.isOpen!}
     }
 
 class socket

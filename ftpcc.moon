@@ -514,7 +514,7 @@ class server_connection
                     d = data\sub i, i + 126
                     @send string.char(#d) .. d
                 @send "\0\128"
-        @socket\send "226 Transfer complete"
+        @socket\send "226 Transfer complete\n"
         @connection.socket\close!
         if @connection.id == nil then port_provider @connection.port
     
@@ -553,12 +553,17 @@ class server
     -- @param auth A function that takes up to two arguments (username, password), and returns whether those arguments should authorize a user (default is no authorization)
     -- @param filesystem A filesystem object used for reading/writing files (defaults to the FS API)
     -- @param port_provider A function used for getting passive ports that is either called with no arguments and returns an unopened port, or called with one argument to free a closed port (defaults to a built-in implementation)
-    new: (modem, port=21, auth=nil, filesystem=fs, port_provider=createPortProvider modem) =>
+    new: (modem, port=21, auth=nil, filesystem=fs, port_provider=createPortProvider(modem), ip) =>
         @modem = modem
         @port = port
         @auth = auth
         @filesystem = filesystem
         @port_provider = port_provider
+        if ip
+            p = {ip\match"(%d+).(%d+).(%d+).(%d+)"}
+            @id = bit32.lshift(tonumber(p[1]), 24) + bit32.lshift(tonumber(p[2]), 16) + bit32.lshift(tonumber(p[3]), 8) + tonumber(p[4])
+        else
+            @id = os.computerID!
         @modem.open @port
 
     --- A table that holds all of the commands.
@@ -595,12 +600,12 @@ class server
             state.transfer_params = {type: "A", mode: "S"}
             return "220 Service ready for new user."
         QUIT: (self, state) ->
-            state.socket\send "221 Goodbye."
+            state.socket\send "221 Goodbye.\n"
             state.socket\close!
         PORT: (self, state, port) ->
             return "530 Not logged in." if self.auth != nil and not self.auth state.username, state.password
             return "501 Missing ID/port" if port == nil
-            p = port\match"(%d+),(%d+),(%d+),(%d+),(%d+),(%d+)"
+            p = {port\match"(%d+),(%d+),(%d+),(%d+),(%d+),(%d+)"}
             return "501 Port specified is not correctly formatted" if tonumber(p[1]) == nil or tonumber(p[2]) == nil or tonumber(p[3]) == nil or tonumber(p[4]) == nil or tonumber(p[5]) == nil or tonumber(p[6]) == nil
             state.connection = {
                 id: bit32.lshift(tonumber(p[1]), 24) + bit32.lshift(tonumber(p[2]), 16) + bit32.lshift(tonumber(p[3]), 8) + tonumber(p[4])
@@ -613,10 +618,10 @@ class server
             id = os.computerID!
             state.connection.task = self\_add_task (-> state.connection.socket = listen id, self.modem, state.connection.port), "passive listener " .. state.connection.port
             sleep 0.05
-            return ("227 Entering passive mode. %d,%d,%d,%d,%d,%d")\format bit32.rshift(bit32.band(id, 0xFF000000), 24), 
-                bit32.rshift(bit32.band(id, 0xFF0000), 16),
-                bit32.rshift(bit32.band(id, 0xFF00), 8),
-                bit32.band(id, 0xFF),
+            return ("227 Entering passive mode. %d,%d,%d,%d,%d,%d")\format bit32.rshift(bit32.band(@id, 0xFF000000), 24), 
+                bit32.rshift(bit32.band(@id, 0xFF0000), 16),
+                bit32.rshift(bit32.band(@id, 0xFF00), 8),
+                bit32.band(@id, 0xFF),
                 bit32.rshift(bit32.band(state.connection.port, 0xFF00), 8),
                 bit32.band state.connection.port, 0xFF
         TYPE: (self, state, type) ->
@@ -639,7 +644,7 @@ class server
             path = if file\sub(1, 1) == "/" then file else fs.combine state.dir, file
             if not self.filesystem.exists(path) or self.filesystem.isDir path
                 state.connection = nil
-                return "550 " .. (self.filesystem.isDir(path) and "Path is directory" or "File does not exist")
+                return "550 " .. (self.filesystem.isDir(path) and "Path is directory" or "File '" .. path .. "' does not exist")
             state.current_task = self\_add_task (-> 
                     if state.connection.id != nil
                         state.connection.socket = connect os.computerID!, self.modem, state.connection.id, self.connection.port, 1
@@ -809,10 +814,37 @@ class server
             return '257 Created directory "' .. path .. '"'
         PWD: (self, state) ->
             return "530 Not logged in." if self.auth != nil and not self.auth state.username, state.password
-            return '257 "' .. self.dir .. '"'
+            return '257 "/' .. state.dir .. '"'
         LIST: (self, state, file=state.dir) ->
             return "530 Not logged in." if self.auth != nil and not self.auth state.username, state.password
-            return "202 Not implemented yet"
+            return "503 Bad sequence of commands" if state.connection.port == nil
+            return "425 Data connection already open" if state.current_task != nil
+            path = if file\sub(1, 1) == "/" then file else fs.combine state.dir, file
+            if not self.filesystem.isDir path
+                state.connection = nil
+                return "550 Path is not a directory"
+            state.current_task = self\_add_task (->
+                    if state.connection.id != nil
+                        state.connection.socket = connect os.computerID!, self.modem, state.connection.id, self.connection.port, 1
+                    if state.connection.socket == nil
+                        if state.connection.task != nil then self.tasks[state.connection.task] = nil
+                        state.connection = nil
+                        state.socket\send "425 Unable to open data connection."
+                    entries = {}
+                    for i,v in ipairs self.filesystem.list path
+                        p = fs.combine(path, v)
+                        attr = self.filesystem.attributes p
+                        entries[i] = ("%s%s % 4d craftos craftos % 8d %s %s")\format attr.isDir and "d" or "-", (attr.isReadOnly and "r-x" or "rwx")\rep(3), attr.isDir and #self.filesystem.list(p) or 1, attr.size, os.date("%h %e  %Y", attr.modified / 1000), v
+                    state\send_data table.concat(entries, "\n") .. "\n", self.port_provider
+                    state.connection = nil
+                    state.current_task = nil
+                    state.status.current_bytes = nil
+                    state.status.target_bytes = nil
+                    state.status.current_command = nil
+                ), "name list " .. file
+            state.status.current_command = "NLST " .. path
+            if state.connection.socket == nil then return "150 Opening data connection"
+            else return "125 Data connection already open; transfer starting."
         NLST: (self, state, file=state.dir) ->
             return "530 Not logged in." if self.auth != nil and not self.auth state.username, state.password
             return "503 Bad sequence of commands" if state.connection.port == nil
@@ -828,7 +860,7 @@ class server
                         if state.connection.task != nil then self.tasks[state.connection.task] = nil
                         state.connection = nil
                         state.socket\send "425 Unable to open data connection."
-                    state\send_data table.concat([v for _,v in ipairs self.filesystem.list path], "\n"), self.port_provider
+                    state\send_data table.concat([v for _,v in ipairs self.filesystem.list path], "\n") .. "\n", self.port_provider
                     state.connection = nil
                     state.current_task = nil
                     state.status.current_bytes = nil
@@ -863,18 +895,18 @@ class server
             @_add_task (-> @_run_connection server_connection socket), "connection " .. socket.id
 
     _run_connection: (state) =>
-        state.socket\send "220 Hello!"
+        state.socket\send "220 Hello!\n"
         while state.socket.is_open
             req, err = state.socket\receive 3600
             break if req == nil
-            command, arg = req
-            if req\find " " then command, arg = req\sub(1, req\find" " - 1)\upper!, req\sub req\find" " + 1
-            if @commands[command] == nil then state.socket\send "500 Unknown command '" .. command .. "'"
+            command, arg = (req\gsub "%s+$", "")
+            if req\find " " then command, arg = req\sub(1, req\find" " - 1)\upper!\gsub("%s+$", ""), req\sub(req\find" " + 1)\gsub "%s+$", ""
+            if @commands[command] == nil then state.socket\send "500 Unknown command '" .. command .. "'\n"
             else
                 if arg == "" then arg = nil
                 reply = @commands[command] @, state, arg
                 break unless state.socket.is_open
-                if @commands[command] != nil then state.socket\send reply
+                if @commands[command] != nil then state.socket\send reply .. "\n"
         state.socket\close!
 
     --- Listens for FTP requests.

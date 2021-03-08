@@ -859,7 +859,7 @@ do
         end
         self:send("\0\128")
       end
-      self.socket:send("226 Transfer complete")
+      self.socket:send("226 Transfer complete\n")
       self.connection.socket:close()
       if self.connection.id == nil then
         return port_provider(self.connection.port)
@@ -1009,7 +1009,7 @@ do
         return "220 Service ready for new user."
       end,
       QUIT = function(self, state)
-        state.socket:send("221 Goodbye.")
+        state.socket:send("221 Goodbye.\n")
         return state.socket:close()
       end,
       PORT = function(self, state, port)
@@ -1019,7 +1019,9 @@ do
         if port == nil then
           return "501 Missing ID/port"
         end
-        local p = port:match("(%d+),(%d+),(%d+),(%d+),(%d+),(%d+)")
+        local p = {
+          port:match("(%d+),(%d+),(%d+),(%d+),(%d+),(%d+)")
+        }
         if tonumber(p[1]) == nil or tonumber(p[2]) == nil or tonumber(p[3]) == nil or tonumber(p[4]) == nil or tonumber(p[5]) == nil or tonumber(p[6]) == nil then
           return "501 Port specified is not correctly formatted"
         end
@@ -1042,7 +1044,7 @@ do
           state.connection.socket = listen(id, self.modem, state.connection.port)
         end), "passive listener " .. state.connection.port)
         sleep(0.05)
-        return ("227 Entering passive mode. %d,%d,%d,%d,%d,%d"):format(bit32.rshift(bit32.band(id, 0xFF000000), 24), bit32.rshift(bit32.band(id, 0xFF0000), 16), bit32.rshift(bit32.band(id, 0xFF00), 8), bit32.band(id, 0xFF), bit32.rshift(bit32.band(state.connection.port, 0xFF00), 8), bit32.band(state.connection.port, 0xFF))
+        return ("227 Entering passive mode. %d,%d,%d,%d,%d,%d"):format(bit32.rshift(bit32.band(self.id, 0xFF000000), 24), bit32.rshift(bit32.band(self.id, 0xFF0000), 16), bit32.rshift(bit32.band(self.id, 0xFF00), 8), bit32.band(self.id, 0xFF), bit32.rshift(bit32.band(state.connection.port, 0xFF00), 8), bit32.band(state.connection.port, 0xFF))
       end,
       TYPE = function(self, state, type)
         local c = type:sub(1, 1):upper()
@@ -1087,7 +1089,7 @@ do
         end
         if not self.filesystem.exists(path) or self.filesystem.isDir(path) then
           state.connection = nil
-          return "550 " .. (self.filesystem.isDir(path) and "Path is directory" or "File does not exist")
+          return "550 " .. (self.filesystem.isDir(path) and "Path is directory" or "File '" .. path .. "' does not exist")
         end
         state.current_task = self:_add_task((function()
           if state.connection.id ~= nil then
@@ -1438,7 +1440,7 @@ do
         if self.auth ~= nil and not self.auth(state.username, state.password) then
           return "530 Not logged in."
         end
-        return '257 "' .. self.dir .. '"'
+        return '257 "/' .. state.dir .. '"'
       end,
       LIST = function(self, state, file)
         if file == nil then
@@ -1447,7 +1449,52 @@ do
         if self.auth ~= nil and not self.auth(state.username, state.password) then
           return "530 Not logged in."
         end
-        return "202 Not implemented yet"
+        if state.connection.port == nil then
+          return "503 Bad sequence of commands"
+        end
+        if state.current_task ~= nil then
+          return "425 Data connection already open"
+        end
+        local path
+        if file:sub(1, 1) == "/" then
+          path = file
+        else
+          path = fs.combine(state.dir, file)
+        end
+        if not self.filesystem.isDir(path) then
+          state.connection = nil
+          return "550 Path is not a directory"
+        end
+        state.current_task = self:_add_task((function()
+          if state.connection.id ~= nil then
+            state.connection.socket = connect(os.computerID(), self.modem, state.connection.id, self.connection.port, 1)
+          end
+          if state.connection.socket == nil then
+            if state.connection.task ~= nil then
+              self.tasks[state.connection.task] = nil
+            end
+            state.connection = nil
+            state.socket:send("425 Unable to open data connection.")
+          end
+          local entries = { }
+          for i, v in ipairs(self.filesystem.list(path)) do
+            local p = fs.combine(path, v)
+            local attr = self.filesystem.attributes(p)
+            entries[i] = ("%s%s % 4d craftos craftos % 8d %s %s"):format(attr.isDir and "d" or "-", (attr.isReadOnly and "r-x" or "rwx"):rep(3), attr.isDir and #self.filesystem.list(p) or 1, attr.size, os.date("%h %e  %Y", attr.modified / 1000), v)
+          end
+          state:send_data(table.concat(entries, "\n") .. "\n", self.port_provider)
+          state.connection = nil
+          state.current_task = nil
+          state.status.current_bytes = nil
+          state.status.target_bytes = nil
+          state.status.current_command = nil
+        end), "name list " .. file)
+        state.status.current_command = "NLST " .. path
+        if state.connection.socket == nil then
+          return "150 Opening data connection"
+        else
+          return "125 Data connection already open; transfer starting."
+        end
       end,
       NLST = function(self, state, file)
         if file == nil then
@@ -1491,7 +1538,7 @@ do
               _len_0 = _len_0 + 1
             end
             return _accum_0
-          end)(), "\n"), self.port_provider)
+          end)(), "\n") .. "\n", self.port_provider)
           state.connection = nil
           state.current_task = nil
           state.status.current_bytes = nil
@@ -1545,18 +1592,18 @@ do
       end
     end,
     _run_connection = function(self, state)
-      state.socket:send("220 Hello!")
+      state.socket:send("220 Hello!\n")
       while state.socket.is_open do
         local req, err = state.socket:receive(3600)
         if req == nil then
           break
         end
-        local command, arg = req
+        local command, arg = (req:gsub("%s+$", ""))
         if req:find(" ") then
-          command, arg = req:sub(1, req:find(" ") - 1):upper(), req:sub(req:find(" ") + 1)
+          command, arg = req:sub(1, req:find(" ") - 1):upper():gsub("%s+$", ""), req:sub(req:find(" ") + 1):gsub("%s+$", "")
         end
         if self.commands[command] == nil then
-          state.socket:send("500 Unknown command '" .. command .. "'")
+          state.socket:send("500 Unknown command '" .. command .. "'\n")
         else
           if arg == "" then
             arg = nil
@@ -1566,7 +1613,7 @@ do
             break
           end
           if self.commands[command] ~= nil then
-            state.socket:send(reply)
+            state.socket:send(reply .. "\n")
           end
         end
       end
@@ -1608,7 +1655,7 @@ do
   }
   _base_0.__index = _base_0
   _class_0 = setmetatable({
-    __init = function(self, modem, port, auth, filesystem, port_provider)
+    __init = function(self, modem, port, auth, filesystem, port_provider, ip)
       if port == nil then
         port = 21
       end
@@ -1626,6 +1673,14 @@ do
       self.auth = auth
       self.filesystem = filesystem
       self.port_provider = port_provider
+      if ip then
+        local p = {
+          ip:match("(%d+).(%d+).(%d+).(%d+)")
+        }
+        self.id = bit32.lshift(tonumber(p[1]), 24) + bit32.lshift(tonumber(p[2]), 16) + bit32.lshift(tonumber(p[3]), 8) + tonumber(p[4])
+      else
+        self.id = os.computerID()
+      end
       return self.modem.open(self.port)
     end,
     __base = _base_0,
